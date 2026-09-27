@@ -6,12 +6,14 @@ Integrantes:
 - Nicoly Stefany Moura Ferreira
 - Sophia Bernardo de Oliveira
 
-ROBO 02: ESPECIALISTA EM MELEE (varios robos ao mesmo tempo)
+ROBO 02: RISCO MINIMO E SOBREVIVENCIA
 
-Esse e o robo de sobrevivencia da dupla. Enquanto o robo 01 foi feito para
-ganhar o duelo na precisao, esse foi feito para se manter vivo e pontuando
-quando ha muita gente atirando ao mesmo tempo. Os dois sao independentes, nao
-se reconhecem, nao combinam nada e nao poupam um ao outro.
+Papel na dupla: fora do duelo ele nao orbita ninguem, vai para o ponto menos
+perigoso do campo. Nos nossos testes em 2x2 contra duplas de campeoes da
+comunidade, esse estilo rendeu mais contra robos feitos para duelo, enquanto o
+robo 01 rendeu mais contra robos feitos para melee. No 1v1 os dois usam a mesma
+defesa por ondas e a mesma mira contextual. Os dois nao trocam mensagens; so
+se reconhecem pelo nome (veja COLEGA DE EQUIPE).
 
 RADAR
 Em duelo ele trava no adversario, como o robo 01. Em melee ele faz o contrario
@@ -36,16 +38,17 @@ Com isso o robo termina inimigos quase mortos em vez de repartir dano entre
 todos e nao matar ninguem.
 
 MOVIMENTACAO
-Sao dois modos, escolhidos por getOthers().
+Sao dois modos, escolhidos pelo numero de adversarios vivos.
 - MELEE: nao seguimos uma orbita, escolhemos um destino. Testamos 28 direcoes
   ao redor e vamos para a menos perigosa, olhando tanto o ponto de chegada
   quanto o meio do caminho. O meio do caminho importa porque senao o robo
   atravessa por cima de um inimigo para fugir de outro. A ideia e inspirada em
   Minimum Risk Movement e Anti-Gravity, mas em vez de somar vetores de repulsao
   escolhemos um destino entre varios candidatos.
-- DUELO: estimamos ondas de disparo e comparamos continuar, inverter e frear
-  antes da chegada das balas. O mapa de perigo aprende com os impactos. Sem
-  onda confiavel, usamos o deslocamento lateral com inversoes espacadas.
+- DUELO E 2x2 (ate 2 inimigos vivos): estimamos ondas de disparo e comparamos
+  continuar, inverter e frear antes da chegada das balas. O mapa de perigo
+  aprende com os impactos. Sem onda confiavel: no duelo, deslocamento lateral
+  com inversoes espacadas; com 2 inimigos, o movimento por risco.
 No duelo, se sairmos da area segura, apontamos para o centro antes de voltar
 a orbita. No melee, so aceitamos destinos dentro da area segura. Se nenhum
 candidato servir, o destino escolhido e o centro do campo.
@@ -67,8 +70,17 @@ porque em melee a batalha e longa e a energia precisa durar ate o fim.
 
 DIFERENCA 1v1 / MELEE
 Muda o radar, muda o movimento inteiro e muda o peso da selecao de alvo. A
-troca e automatica por getOthers(). Nos testes ele tambem venceu todos os
-samples oficiais em duelo, entao o modo 1v1 nao e um modo "de emergencia".
+troca e automatica pelo numero de adversarios vivos. Nos testes ele tambem
+venceu todos os samples oficiais em duelo, entao o modo 1v1 nao e um modo
+"de emergencia".
+
+COLEGA DE EQUIPE
+Os dois robos se reconhecem pelo nome (VASP_01 e VASP_02) ou, numa batalha de
+times oficial do Robocode (arquivo .team), pela propria API (TeamRobot).
+Enquanto houver algum inimigo vivo, o robo nao mira no colega, nao atira com
+ele na linha de tiro, evita chegar perto dele e conta so os inimigos para
+decidir entre modo duelo e melee. Se sobrarem so os dois VASP, eles lutam
+entre si normalmente. Nao ha troca de mensagens entre os robos.
 
 INSPIRACOES (conceitos estudados na comunidade Robocode; todo o codigo foi
 escrito pela equipe)
@@ -83,7 +95,92 @@ import robocode.*;
 import robocode.util.Utils;
 import java.util.*;
 
-public class VASP_02 extends AdvancedRobot {
+public class VASP_02 extends TeamRobot {
+    /* COLEGA DE EQUIPE. O outro robo da equipe e reconhecido pelo nome
+       (VASP_01 e VASP_02) ou, numa batalha de times oficial do Robocode
+       (arquivo .team), pela propria API: por isso o robo estende TeamRobot.
+       Enquanto houver algum inimigo vivo, o colega nao e alvo nem ameaca, nao
+       atiramos com ele na linha de tiro e evitamos trombar com ele. Se so
+       sobrarem os dois VASP, eles lutam normalmente, senao o round ficaria
+       parado ate o limite de inatividade. Nao ha troca de mensagens. */
+    private static final String PREFIXO_EQUIPE = "VASP_0";
+    private boolean colegaVivo;
+
+    // Nome sem pacote, sem versao e sem o "*" de versao de desenvolvimento:
+    // "pacote.VASP_02 1.0" vira "VASP_02".
+    private static String nomeBase(String nome) {
+        String semVersao = nome.split(" ")[0];
+        return semVersao.substring(semVersao.lastIndexOf('.') + 1).replace("*", "");
+    }
+
+    // Verdadeiro se o robo com esse nome e o outro robo da nossa equipe.
+    private boolean mesmaEquipe(String nome) {
+        if (isTeammate(nome))
+            return true;
+        String base = nomeBase(nome);
+        return base.startsWith(PREFIXO_EQUIPE) && !base.equals(nomeBase(getName()));
+    }
+
+    // Colega que devemos poupar: da nossa equipe e com algum inimigo ainda vivo.
+    private boolean ehColega(String nome) {
+        return getOthers() > 1 && mesmaEquipe(nome);
+    }
+
+    private double colegaX, colegaY, colegaDirecao, colegaVelocidade;
+    private long colegaVisto = -100;
+    // Distancia minima que tentamos manter do colega para nao trombar com ele.
+    private static final double DISTANCIA_COLEGA = 110;
+
+    /* Onde o colega deve estar agora. Quando o radar trava num inimigo (duelo
+       no fim do round) paramos de ver o colega; entao estimamos a posicao
+       dele seguindo em linha reta a partir da ultima leitura, por ate 20 ticks. */
+    private double colegaEstimadoX() {
+        long dt = Math.min(20, getTime() - colegaVisto);
+        return limitar(colegaX + colegaVelocidade * Math.sin(colegaDirecao) * dt, 18,
+                getBattleFieldWidth() - 18);
+    }
+
+    private double colegaEstimadoY() {
+        long dt = Math.min(20, getTime() - colegaVisto);
+        return limitar(colegaY + colegaVelocidade * Math.cos(colegaDirecao) * dt, 18,
+                getBattleFieldHeight() - 18);
+    }
+
+    // Temos informacao do colega recente o bastante para confiar (30 ticks)
+    // e ainda existe inimigo em campo (senao o colega virou adversario).
+    private boolean colegaConhecido() {
+        return getTime() - colegaVisto <= 30 && getOthers() > 1;
+    }
+
+    /* Verdadeiro se o colega de time esta entre nos e o alvo, perto da linha
+       do tiro. So vale com o colega em campo e algum inimigo vivo. A margem
+       cresce com o tempo desde que o vimos. */
+    private boolean colegaNaLinha(double anguloTiro, double distanciaAlvo) {
+        if (!colegaConhecido())
+            return false;
+        double cx = colegaEstimadoX(), cy = colegaEstimadoY();
+        double distanciaColega = Math.hypot(cx - getX(), cy - getY());
+        if (distanciaColega > distanciaAlvo + 20)
+            return false;
+        double desvio = Utils.normalRelativeAngle(Math.atan2(cx - getX(), cy - getY()) - anguloTiro);
+        double margem = 30 + 4 * (getTime() - colegaVisto);
+        return Math.abs(desvio) < Math.atan2(margem, Math.max(1, distanciaColega));
+    }
+
+    // Verdadeiro se um ponto do campo fica longe o bastante do colega.
+    // Sem colega conhecido e sempre verdadeiro.
+    private boolean longeDoColega(double x, double y) {
+        if (!colegaConhecido())
+            return true;
+        return Math.hypot(x - colegaEstimadoX(), y - colegaEstimadoY()) > DISTANCIA_COLEGA;
+    }
+
+    // Quantos adversarios de verdade ainda estao vivos (getOthers() conta
+    // tambem o colega). Se so resta o colega, ele conta como adversario.
+    private int adversariosVivos() {
+        return colegaVivo && getOthers() > 1 ? getOthers() - 1 : getOthers();
+    }
+
     // Parametros reunidos no topo para facilitar os ajustes.
     private static final double MARGEM_CAMPO = 48, DISTANCIA_MOVIMENTO = 135, DISTANCIA_ORBITA = 310;
     private static final int VALIDADE_SCAN = 30; // acima disso a ficha do inimigo e velha
@@ -108,6 +205,8 @@ public class VASP_02 extends AdvancedRobot {
     }
 
     public void run() {
+        String[] colegas = getTeammates();
+        colegaVivo = colegas != null && colegas.length > 0;
         // No comeco da batalha (round 0) zeramos o que foi aprendido, para uma
         // batalha nao contaminar a seguinte. Nos rounds 1 a 4 o aprendizado continua.
         if (getRoundNum() == 0) {
@@ -133,6 +232,18 @@ public class VASP_02 extends AdvancedRobot {
 
     // Atualiza a ficha de quem o radar acabou de ver.
     public void onScannedRobot(ScannedRobotEvent event) {
+        // O colega de equipe nao e alvo nem ameaca enquanto houver inimigo vivo.
+        if (ehColega(event.getName())) {
+            colegaVivo = true;
+            // Guardamos onde o colega esta para nao atirar com ele na frente.
+            double anguloColega = getHeadingRadians() + event.getBearingRadians();
+            colegaX = getX() + event.getDistance() * Math.sin(anguloColega);
+            colegaY = getY() + event.getDistance() * Math.cos(anguloColega);
+            colegaDirecao = event.getHeadingRadians();
+            colegaVelocidade = event.getVelocity();
+            colegaVisto = getTime();
+            return;
+        }
         defesa.observar(event);
         miraContextual.observar(event);
         EstadoInimigo o = inimigos.get(event.getName());
@@ -197,7 +308,7 @@ public class VASP_02 extends AdvancedRobot {
     }
 
     private void atualizarRadar() {
-        if (getOthers() == 1 && alvoAtual != null && getTime() - alvoAtual.ultimoScan < 3) {
+        if (adversariosVivos() == 1 && alvoAtual != null && getTime() - alvoAtual.ultimoScan < 3) {
             // No duelo trava no alvo. O fator 1.9 faz o radar passar do ponto, o que
             // garante que ele cruze o inimigo mesmo que o inimigo tenha se movido.
             double diferenca = Utils
@@ -213,7 +324,7 @@ public class VASP_02 extends AdvancedRobot {
             /* Giro completo se ainda nao conhecemos todo mundo ou se a informacao mais
                antiga ja passou do aceitavel. E assim que o radar se recupera sozinho
                quando perde o mapa do campo. */
-            if (maisAntigo == null || inimigos.size() < getOthers() || getTime() - maisAntigo.ultimoScan > 16) {
+            if (maisAntigo == null || inimigos.size() < adversariosVivos() || getTime() - maisAntigo.ultimoScan > 16) {
                 setTurnRadarRightRadians(Double.POSITIVE_INFINITY);
             } else {
                 /* Aponta para ele e varre uma faixa em volta. A faixa cresce com o
@@ -230,7 +341,7 @@ public class VASP_02 extends AdvancedRobot {
 
     // Decide qual dos dois modos de movimento usar neste tick.
     private void atualizarMovimento() {
-        // No duelo, se ha onda de disparo a caminho (e nenhuma manobra de colisao
+        // Com ate 2 inimigos, se ha onda de disparo a caminho (e nenhuma manobra de colisao
         // em andamento), o modulo de defesa decide o movimento neste tick.
         if (getTime() >= colisaoAte && defesa.mover())
             return;
@@ -241,7 +352,7 @@ public class VASP_02 extends AdvancedRobot {
 
         // Com varios inimigos usamos o movimento por risco, e com um so o deslocamento
         // lateral.
-        if (getOthers() > 1 && !inimigos.isEmpty()) {
+        if (adversariosVivos() > 1 && !inimigos.isEmpty()) {
             movimentoPorRisco();
             return;
         }
@@ -273,7 +384,7 @@ public class VASP_02 extends AdvancedRobot {
         for (int i = -12; i <= 12; i++) {
             double a = rumo + i * Math.PI / 24;
             double x = getX() + DISTANCIA_MOVIMENTO * Math.sin(a), y = getY() + DISTANCIA_MOVIMENTO * Math.cos(a);
-            if (!dentroAreaSegura(x, y))
+            if (!dentroAreaSegura(x, y) || !longeDoColega(x, y))
                 continue;
             double custo = Math.abs(i);
             if (custo < melhor) {
@@ -352,6 +463,12 @@ public class VASP_02 extends AdvancedRobot {
             custo += forcaAmeaca * (1 + 0.45 * componenteRadial * componenteRadial)
                     * Math.pow(210 / Math.max(36, distancia), 2);
         }
+        // Ficar perto do colega tambem custa: evita trombadas e que um fique
+        // na linha de tiro do outro.
+        if (colegaConhecido()) {
+            double distanciaColega = Math.hypot(x - colegaEstimadoX(), y - colegaEstimadoY());
+            custo += 0.7 * Math.pow(150 / Math.max(36, distanciaColega), 2);
+        }
         return custo;
     }
 
@@ -389,7 +506,8 @@ public class VASP_02 extends AdvancedRobot {
         setTurnGunRightRadians(erroMira);
         // So atira com o canhao frio, ja alinhado dentro da largura angular do alvo
         // e com energia sobrando depois do tiro.
-        if (getGunHeat() == 0 && Math.abs(erroMira) < Math.atan2(17, o.distancia) && getEnergy() > potencia + 0.4) {
+        if (getGunHeat() == 0 && Math.abs(erroMira) < Math.atan2(17, o.distancia) && getEnergy() > potencia + 0.4
+                && !colegaNaLinha(anguloEscolhido, o.distancia)) {
             // Registramos o tiro so se a bala realmente saiu.
             if (setFireBullet(potencia) != null)
                 miraContextual.registrar(o.nome, potencia);
@@ -448,6 +566,10 @@ public class VASP_02 extends AdvancedRobot {
     // Quando alguem morre, tiramos do mapa para nao mirar em fantasma nem contar
     // o perigo de quem nao existe mais.
     public void onRobotDeath(RobotDeathEvent event) {
+        if (mesmaEquipe(event.getName())) {
+            colegaVivo = false;
+            colegaVisto = -100;
+        }
         miraContextual.remover(event.getName());
         inimigos.remove(event.getName());
         if (alvoAtual != null && alvoAtual.nome.equals(event.getName()))
@@ -479,7 +601,7 @@ public class VASP_02 extends AdvancedRobot {
     }
 
     // =====================================================================
-    // MODULO DE DEFESA POR ONDAS (usado so no duelo)
+    // MODULO DE DEFESA POR ONDAS (usado com ate 2 inimigos vivos)
     // Inspiracao: conceito de "Wave Surfing" da comunidade Robocode. O codigo
     // foi escrito pela equipe. Ideia: quando o inimigo atira, a energia dele
     // cai entre 0.1 e 3. Tratamos cada queda como uma "onda" circular que sai
@@ -490,6 +612,10 @@ public class VASP_02 extends AdvancedRobot {
     // BINS_DEFESA: em quantas faixas dividimos o angulo de fuga para medir perigo.
     // LIMITE_ONDAS: maximo de ondas acompanhadas ao mesmo tempo.
     private static final int BINS_DEFESA = 41, LIMITE_ONDAS = 14;
+    // Com ate 2 inimigos (o caso do 2x2 com o colega vivo) o radar consegue
+    // rever cada um a cada 1 ou 2 ticks, entao a deteccao de disparos pela queda
+    // de energia continua confiavel. Com mais inimigos ela vira chute.
+    private static final int INIMIGOS_ONDAS = 2;
     // SEGMENTOS_DETALHE = 2 distancias x 3 velocidades laterais x 3 aceleracoes x 2 parede.
     private static final int SEGMENTOS_DETALHE = 36;
     // Perfil de perigo por adversario. E static para durar entre os rounds da
@@ -537,7 +663,7 @@ public class VASP_02 extends AdvancedRobot {
     }
 
     /* Guarda nossas ultimas posicoes, detecta disparos pela queda de energia,
-       aprende onde fomos atingidos e decide o movimento no duelo comparando
+       aprende onde fomos atingidos e decide o movimento, com ate 2 inimigos, comparando
        tres opcoes: continuar no sentido atual, inverter ou frear. A onda e uma
        estimativa, porque nao temos acesso a posicao real das balas em voo. */
     private class DefesaOndas {
@@ -561,9 +687,10 @@ public class VASP_02 extends AdvancedRobot {
 
         /* Chamado a cada scan. Se a energia do inimigo caiu entre 0.1 e 3 e nada
            mais explica a queda (colisao, parede ou bala nossa), consideramos que
-           ele atirou e criamos uma onda. So fazemos isso no duelo e com scans
-           seguidos: no melee varios inimigos atiram e as leituras sao espacadas,
-           entao a deteccao nao seria confiavel. */
+           ele atirou e criamos uma onda. So fazemos isso com ate 2 inimigos
+           vivos (duelo ou 2x2 com o colega) e com scans de no maximo 2 ticks de
+           intervalo: com mais inimigos as leituras ficam espacadas demais e a
+           deteccao nao seria confiavel. */
         void observar(ScannedRobotEvent e) {
             EnergiaObservada anterior = energia.get(e.getName());
             if (anterior == null) {
@@ -588,11 +715,11 @@ public class VASP_02 extends AdvancedRobot {
                 queda -= Math.max(0, Math.abs(anterior.velocidade) / 2 - 1);
             int historico = (int) (Math.max(0, agora - 2) % posicoes.length);
             // Todas as condicoes abaixo precisam valer para a queda contar como
-            // disparo: duelo, scan no tick anterior, sem colisao recente, canhao
+            // disparo: ate 2 inimigos, scan recente, sem colisao recente, canhao
             // dele ja frio, queda entre 0.1 e 3, nossa posicao conhecida e ele
             // nao colado em nos.
-            if (getOthers() == 1
-                    && agora - anterior.tick == 1
+            if (adversariosVivos() <= INIMIGOS_ONDAS
+                    && agora - anterior.tick <= 2
                     && agora > anterior.ambiguoAte
                     && agora >= anterior.proximoTiro
                     && queda >= 0.0999
@@ -718,7 +845,7 @@ public class VASP_02 extends AdvancedRobot {
             ondas.remove(correspondente);
         }
 
-        /* Decide o movimento no duelo. Pega as duas ondas que chegam primeiro e
+        /* Decide o movimento com ate 2 inimigos. Pega as duas ondas que chegam primeiro e
            simula tres opcoes ate elas passarem: continuar, inverter e frear.
            Inverter so vence se for pelo menos 3% melhor, e frear so se for 10%
            melhor e estivermos longe do atirador, para nao trocar de ideia por
@@ -726,7 +853,7 @@ public class VASP_02 extends AdvancedRobot {
            normal do robo assume. */
         boolean mover() {
             setMaxVelocity(8);
-            if (getOthers() != 1) {
+            if (adversariosVivos() > INIMIGOS_ONDAS) {
                 ondas.clear();
                 return false;
             }
@@ -808,7 +935,8 @@ public class VASP_02 extends AdvancedRobot {
                 if (px > 25
                         && py > 25
                         && px < getBattleFieldWidth() - 25
-                        && py < getBattleFieldHeight() - 25) return a;
+                        && py < getBattleFieldHeight() - 25
+                        && longeDoColega(px, py)) return a;
             }
             return Math.atan2(getBattleFieldWidth() / 2 - x, getBattleFieldHeight() / 2 - y);
         }
