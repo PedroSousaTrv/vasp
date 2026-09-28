@@ -77,9 +77,12 @@ venceu todos os samples oficiais em duelo, entao o modo 1v1 nao e um modo
 COLEGA DE EQUIPE
 Os dois robos se reconhecem pelo nome (VASP_01 e VASP_02) ou, numa batalha de
 times oficial do Robocode (arquivo .team), pela propria API (TeamRobot).
-Enquanto houver algum inimigo vivo, o robo nao mira no colega, nao atira com
-ele na linha de tiro, evita chegar perto dele e conta so os inimigos para
-decidir entre modo duelo e melee. Se sobrarem so os dois VASP, eles lutam
+Enquanto houver algum inimigo vivo, o robo nao mira no colega, nao atira
+quando o colega esta perto da linha do tiro (antes ou depois do alvo, porque
+os tiros que erram seguem voando), evita chegar perto dele e conta so os
+inimigos para decidir entre modo duelo e melee. No 2 contra 1 o radar fica
+travado no inimigo, entao a cada 10 ticks ele da uma olhada no colega para
+manter a posicao dele atualizada. Se sobrarem so os dois VASP, eles lutam
 entre si normalmente. Nao ha troca de mensagens entre os robos.
 
 INSPIRACOES (conceitos estudados na comunidade Robocode; todo o codigo foi
@@ -152,19 +155,20 @@ public class VASP_02 extends TeamRobot {
         return getTime() - colegaVisto <= 30 && getOthers() > 1;
     }
 
-    /* Verdadeiro se o colega de time esta entre nos e o alvo, perto da linha
-       do tiro. So vale com o colega em campo e algum inimigo vivo. A margem
-       cresce com o tempo desde que o vimos. */
+    /* Verdadeiro se este tiro pode acertar o colega: ele esta perto da linha
+       do disparo, ANTES ou DEPOIS do alvo. A maioria dos tiros erra o alvo e
+       continua voando, entao um colega do outro lado do inimigo tambem corre
+       risco. A margem cresce com o tempo desde que o vimos e com a distancia. */
     private boolean colegaNaLinha(double anguloTiro, double distanciaAlvo) {
         if (!colegaConhecido())
             return false;
         double cx = colegaEstimadoX(), cy = colegaEstimadoY();
         double distanciaColega = Math.hypot(cx - getX(), cy - getY());
-        if (distanciaColega > distanciaAlvo + 20)
-            return false;
         double desvio = Utils.normalRelativeAngle(Math.atan2(cx - getX(), cy - getY()) - anguloTiro);
-        double margem = 30 + 4 * (getTime() - colegaVisto);
-        return Math.abs(desvio) < Math.atan2(margem, Math.max(1, distanciaColega));
+        if (Math.abs(desvio) > Math.PI / 2)
+            return false;
+        double margem = 26 + 4 * (getTime() - colegaVisto) + 0.04 * distanciaColega;
+        return Math.abs(Math.sin(desvio)) * distanciaColega < margem;
     }
 
     // Verdadeiro se um ponto do campo fica longe o bastante do colega.
@@ -307,7 +311,28 @@ public class VASP_02 extends TeamRobot {
         alvoAtual = escolhido;
     }
 
+    /* No 2 contra 1 o radar fica travado no inimigo e paramos de ver o colega.
+       Quando faz mais de 10 ticks que nao o vemos, damos uma olhada rapida
+       para onde ele deve estar; se faz mais de 25, damos uma volta completa.
+       Assim o desvio do colega e a checagem de linha de tiro continuam valendo. */
+    private boolean radarNoColega() {
+        long semVer = getTime() - colegaVisto;
+        if (!colegaVivo || adversariosVivos() != 1 || getOthers() <= 1 || semVer <= 10)
+            return false;
+        if (semVer > 25) {
+            // Perdemos o colega de vista ha muito tempo: uma volta completa acha ele.
+            setTurnRadarRightRadians(Double.POSITIVE_INFINITY);
+            return true;
+        }
+        double diferenca = Utils.normalRelativeAngle(
+                Math.atan2(colegaEstimadoX() - getX(), colegaEstimadoY() - getY()) - getRadarHeadingRadians());
+        setTurnRadarRightRadians(diferenca + Math.copySign(0.3, diferenca));
+        return true;
+    }
+
     private void atualizarRadar() {
+        if (radarNoColega())
+            return;
         if (adversariosVivos() == 1 && alvoAtual != null && getTime() - alvoAtual.ultimoScan < 3) {
             // No duelo trava no alvo. O fator 1.9 faz o radar passar do ponto, o que
             // garante que ele cruze o inimigo mesmo que o inimigo tenha se movido.
